@@ -107,5 +107,61 @@ CREATE INDEX idx_spaceId ON picture (spaceId);
 
 
 
+SELECT
+    id,
+    name,
+    url,
+    thumbnailUrl
+FROM picture
+WHERE isDelete = 0
+ORDER BY id DESC
+LIMIT 15;
 
 
+
+
+SELECT
+    id,
+    name,
+    url,
+    thumbnailUrl
+FROM picture
+WHERE isDelete = 0
+  AND (
+    INSTR(url, 'myqcloud.com ') > 0
+        OR INSTR(thumbnailUrl, 'myqcloud.com ') > 0
+        OR INSTR(url, 'myqcloud.com%20') > 0
+        OR INSTR(thumbnailUrl, 'myqcloud.com%20') > 0
+    );
+
+
+CREATE TABLE picture_url_backup AS
+SELECT *
+FROM picture
+WHERE isDelete = 0;
+
+
+
+SHOW FULL PROCESSLIST;
+SELECT
+    trx_id,
+    trx_state,
+    trx_started,
+    trx_mysql_thread_id,
+    trx_query
+FROM information_schema.innodb_trx;
+
+
+
+SELECT
+    r.trx_mysql_thread_id AS waiting_thread,
+    b.trx_mysql_thread_id AS blocking_thread,
+    r.trx_query AS waiting_sql,
+    b.trx_query AS blocking_sql
+FROM performance_schema.data_lock_waits w
+         JOIN information_schema.innodb_trx r
+              ON w.REQUESTING_ENGINE_TRANSACTION_ID = r.trx_id
+         JOIN information_schema.innodb_trx b
+              ON w.BLOCKING_ENGINE_TRANSACTION_ID = b.trx_id;
+
+ROLLBACK;

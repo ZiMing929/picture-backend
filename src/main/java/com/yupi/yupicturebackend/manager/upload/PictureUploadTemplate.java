@@ -1,4 +1,3 @@
-
 package com.yupi.yupicturebackend.manager.upload;
 
 import cn.hutool.core.collection.CollUtil;
@@ -31,200 +30,315 @@ public abstract class PictureUploadTemplate {
     @Resource
     protected CosClientConfig cosClientConfig;
 
-
     /**
-     * 模板方法：定义图片上传的完整流程
+     * 图片上传模板方法
      *
-     * @param inputSource 图片来源（本地文件或 URL）
+     * @param inputSource 图片来源：本地文件或 URL
      * @param uploadPathPrefix 上传路径前缀
-     * @return 图片上传结果
+     * @return 上传结果
      */
-    public final UploadPictureResult uploadPicture(Object inputSource, String uploadPathPrefix) {
+    public final UploadPictureResult uploadPicture(
+            Object inputSource,
+            String uploadPathPrefix) {
 
-        // 一、校验图片
         validPicture(inputSource);
 
-        // 二、生成图片上传路径
         String uuid = RandomUtil.randomString(16);
         String originFilename = getOriginFilename(inputSource);
-        String uploadFilename = String.format("%s_%s.%s",
+
+        String suffix = FileUtil.getSuffix(originFilename);
+
+        if (suffix == null || suffix.trim().isEmpty()) {
+            throw new BusinessException(
+                    ErrorCode.PARAMS_ERROR,
+                    "图片文件缺少有效扩展名"
+            );
+        }
+
+        suffix = suffix.trim().toLowerCase();
+
+        String uploadFilename = String.format(
+                "%s_%s.%s",
                 DateUtil.formatDate(new Date()),
                 uuid,
-                FileUtil.getSuffix(originFilename));
+                suffix
+        );
 
-        String uploadPath = String.format("/%s/%s", uploadPathPrefix, uploadFilename);
+        // COS 对象 Key 不需要以 / 开头
+        String pathPrefix = uploadPathPrefix == null
+                ? ""
+                : uploadPathPrefix.trim()
+                .replace("\\", "/")
+                .replaceAll("^/+|/+$", "");
+
+        String uploadPath = pathPrefix.isEmpty()
+                ? uploadFilename
+                : pathPrefix + "/" + uploadFilename;
 
         File file = null;
 
         try {
-            // 三、创建本地临时文件
-            file = File.createTempFile("picture_", "." + FileUtil.getSuffix(originFilename));
+            // 创建本地临时文件
+            file = File.createTempFile("picture_", "." + suffix);
 
-            // 四、处理图片来源（本地文件或 URL）
+            // 将上传来源写入临时文件
             processFile(inputSource, file);
 
-            // 五、上传图片到腾讯云 COS，并执行图片处理
-            PutObjectResult putObjectResult = cosManager.putPictureObject(uploadPath, file);
+            // 上传 COS 并执行图片处理
+            PutObjectResult putObjectResult =
+                    cosManager.putPictureObject(uploadPath, file);
 
-            // 六、获取原图信息
-            ImageInfo imageInfo = putObjectResult.getCiUploadResult()
+            if (putObjectResult == null
+                    || putObjectResult.getCiUploadResult() == null
+                    || putObjectResult.getCiUploadResult()
+                    .getOriginalInfo() == null
+                    || putObjectResult.getCiUploadResult()
+                    .getOriginalInfo()
+                    .getImageInfo() == null) {
+
+                throw new IllegalStateException(
+                        "COS 未返回有效的原图信息"
+                );
+            }
+
+            ImageInfo imageInfo = putObjectResult
+                    .getCiUploadResult()
                     .getOriginalInfo()
                     .getImageInfo();
 
-            // 七、获取图片处理结果
-            ProcessResults processResults = putObjectResult.getCiUploadResult().getProcessResults();
+            ProcessResults processResults = putObjectResult
+                    .getCiUploadResult()
+                    .getProcessResults();
 
             if (processResults != null) {
-                List<CIObject> objectList = processResults.getObjectList();
+                List<CIObject> objectList =
+                        processResults.getObjectList();
 
-
-                // 八、按照 COS 处理规则，获取压缩图和缩略图
                 if (CollUtil.isNotEmpty(objectList)) {
+
                     CIObject compressedCiObject = objectList.get(0);
 
-                    // 缩略图默认等于压缩图
-                    CIObject thumbnailCiObject = compressedCiObject;
+                    if (compressedCiObject != null
+                            && hasValidKey(compressedCiObject.getKey())) {
 
-                    // 有生成缩略图，才得到缩略图
-                    if (objectList.size() > 1) {
-                        thumbnailCiObject = objectList.get(1);
+                        CIObject thumbnailCiObject = null;
+
+                        if (objectList.size() > 1) {
+                            CIObject candidate = objectList.get(1);
+
+                            if (candidate != null
+                                    && hasValidKey(candidate.getKey())) {
+                                thumbnailCiObject = candidate;
+                            }
+                        }
+
+                        return buildResult(
+                                originFilename,
+                                compressedCiObject,
+                                thumbnailCiObject
+                        );
                     }
-                    // 封装压缩图返回结果
-                    return buildResult(originFilename, compressedCiObject, thumbnailCiObject);
-                }
-
-                // 兼容只有压缩图、没有缩略图的情况
-                if (CollUtil.isNotEmpty(objectList)) {
-                    CIObject compressedCiObject = objectList.get(0);
-                    return buildResult(originFilename, compressedCiObject, null);
                 }
             }
 
-            // 十、如果 COS 没有返回图片处理结果，则返回原图信息
-            return buildResult(originFilename, file, uploadPath, imageInfo);
+            // COS 没有返回有效的图片处理结果，使用原图
+            return buildResult(
+                    originFilename,
+                    file,
+                    uploadPath,
+                    imageInfo
+            );
 
         } catch (Exception e) {
-            log.error("图片上传到对象存储失败", e);
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "上传失败");
+            log.error(
+                    "图片上传失败，uploadPath={}",
+                    uploadPath,
+                    e
+            );
+
+            throw new BusinessException(
+                    ErrorCode.SYSTEM_ERROR,
+                    "上传失败"
+            );
 
         } finally {
-            // 十一、上传结束后删除临时文件
             deleteTempFile(file);
         }
     }
 
-
     /**
-     * 封装压缩图及缩略图的返回结果
-     *
-     * @param originFilename 原始文件名
-     * @param compressedCiObject 压缩后的图片对象
-     * @param thumbnailCiObject 缩略图对象，允许为 null
-     * @return 图片上传结果
+     * 统一生成 COS 访问地址
+     * 清理 Host 前后空格及重复斜杠
      */
-    private UploadPictureResult buildResult(String originFilename,
-                                            CIObject compressedCiObject,
-                                            CIObject thumbnailCiObject) {
+    private String buildCosUrl(String objectKey) {
 
-        // 一、获取压缩后的图片宽高
-        int picWidth = compressedCiObject.getWidth();
-        int picHeight = compressedCiObject.getHeight();
+        String host = cosClientConfig.getHost();
 
-        // 二、计算图片宽高比
-        double picScale = NumberUtil.round(
-                picWidth * 1.0 / picHeight, 2
-        ).doubleValue();
-
-        // 三、创建返回结果对象
-        UploadPictureResult uploadPictureResult = new UploadPictureResult();
-
-        // 四、设置图片名称
-        uploadPictureResult.setPicName(FileUtil.mainName(originFilename));
-
-        // 五、设置图片尺寸信息
-        uploadPictureResult.setPicWidth(picWidth);
-        uploadPictureResult.setPicHeight(picHeight);
-        uploadPictureResult.setPicScale(picScale);
-
-        // 六、设置图片格式和文件大小
-        uploadPictureResult.setPicFormat(compressedCiObject.getFormat());
-        uploadPictureResult.setPicSize(compressedCiObject.getSize().longValue());
-
-        // 七、设置压缩后的图片 URL
-        uploadPictureResult.setUrl(
-                cosClientConfig.getHost() + "/" + compressedCiObject.getKey()
-        );
-
-        // 八、设置缩略图 URL
-        if (thumbnailCiObject != null) {
-            uploadPictureResult.setThumbnailUrl(
-                    cosClientConfig.getHost() + "/" + thumbnailCiObject.getKey()
+        if (host == null || host.trim().isEmpty()) {
+            throw new BusinessException(
+                    ErrorCode.SYSTEM_ERROR,
+                    "COS Host 未配置"
             );
         }
 
-        // 九、返回结果
-        return uploadPictureResult;
+        if (!hasValidKey(objectKey)) {
+            throw new BusinessException(
+                    ErrorCode.SYSTEM_ERROR,
+                    "COS 对象 Key 无效"
+            );
+        }
+
+        // 去除 Host 前后空格及末尾 /
+        host = host.trim().replaceAll("/+$", "");
+
+        // 去除对象 Key 前后的空格及开头 /
+        String key = objectKey.trim().replaceFirst("^/+", "");
+
+        return host + "/" + key;
     }
 
     /**
-     * 校验图片输入源（本地文件或 URL）
+     * 判断 COS 对象 Key 是否有效
+     */
+    private boolean hasValidKey(String key) {
+
+        if (key == null || key.trim().isEmpty()) {
+            return false;
+        }
+
+        String normalizedKey = key.trim();
+
+        // 防止出现 xxx_thumbnail. 这种缺少扩展名的 Key
+        return !normalizedKey.endsWith(".");
+    }
+
+    /**
+     * 封装压缩图和缩略图上传结果
+     */
+    private UploadPictureResult buildResult(
+            String originFilename,
+            CIObject compressedCiObject,
+            CIObject thumbnailCiObject) {
+
+        int picWidth = compressedCiObject.getWidth();
+        int picHeight = compressedCiObject.getHeight();
+
+        if (picWidth <= 0 || picHeight <= 0) {
+            throw new IllegalStateException(
+                    "COS 返回的图片宽高无效"
+            );
+        }
+
+        double picScale = NumberUtil.round(
+                picWidth * 1.0 / picHeight,
+                2
+        ).doubleValue();
+
+        UploadPictureResult result = new UploadPictureResult();
+
+        result.setPicName(FileUtil.mainName(originFilename));
+        result.setPicWidth(picWidth);
+        result.setPicHeight(picHeight);
+        result.setPicScale(picScale);
+        result.setPicFormat(compressedCiObject.getFormat());
+        result.setPicSize(
+                compressedCiObject.getSize().longValue()
+        );
+
+        // 压缩图 URL
+        String pictureUrl = buildCosUrl(
+                compressedCiObject.getKey()
+        );
+
+        result.setUrl(pictureUrl);
+
+        // 有有效缩略图时使用缩略图，否则使用压缩图
+        if (thumbnailCiObject != null
+                && hasValidKey(thumbnailCiObject.getKey())) {
+
+            result.setThumbnailUrl(
+                    buildCosUrl(thumbnailCiObject.getKey())
+            );
+
+        } else {
+
+            result.setThumbnailUrl(pictureUrl);
+        }
+
+        log.info(
+                "图片上传成功，url={}, thumbnailUrl={}",
+                result.getUrl(),
+                result.getThumbnailUrl()
+        );
+
+        return result;
+    }
+
+    /**
+     * COS 没有返回处理结果时，封装原图信息
+     */
+    private UploadPictureResult buildResult(
+            String originFilename,
+            File file,
+            String uploadPath,
+            ImageInfo imageInfo) {
+
+        int picWidth = imageInfo.getWidth();
+        int picHeight = imageInfo.getHeight();
+
+        if (picWidth <= 0 || picHeight <= 0) {
+            throw new IllegalStateException(
+                    "COS 返回的原图宽高无效"
+            );
+        }
+
+        double picScale = NumberUtil.round(
+                picWidth * 1.0 / picHeight,
+                2
+        ).doubleValue();
+
+        UploadPictureResult result = new UploadPictureResult();
+
+        result.setPicName(FileUtil.mainName(originFilename));
+        result.setPicWidth(picWidth);
+        result.setPicHeight(picHeight);
+        result.setPicScale(picScale);
+        result.setPicFormat(imageInfo.getFormat());
+        result.setPicSize(FileUtil.size(file));
+
+        String pictureUrl = buildCosUrl(uploadPath);
+
+        result.setUrl(pictureUrl);
+        result.setThumbnailUrl(pictureUrl);
+
+        log.info(
+                "图片使用原图回退，url={}",
+                pictureUrl
+        );
+
+        return result;
+    }
+
+    /**
+     * 校验图片输入来源
      */
     protected abstract void validPicture(Object inputSource);
 
     /**
-     * 获取图片原始文件名
+     * 获取原始文件名
      */
     protected abstract String getOriginFilename(Object inputSource);
 
     /**
-     * 处理输入源，生成本地临时文件
+     * 处理图片来源并写入本地文件
      */
-    protected abstract void processFile(Object inputSource, File file) throws Exception;
+    protected abstract void processFile(
+            Object inputSource,
+            File file
+    ) throws Exception;
 
     /**
-     * 封装原图的返回结果
-     *
-     * 当 COS 没有返回压缩图和缩略图时使用
-     */
-    private UploadPictureResult buildResult(String originFilename,
-                                            File file,
-                                            String uploadPath,
-                                            ImageInfo imageInfo) {
-
-        UploadPictureResult uploadPictureResult = new UploadPictureResult();
-
-        // 一、获取原图宽高
-        int picWidth = imageInfo.getWidth();
-        int picHeight = imageInfo.getHeight();
-
-        // 二、计算图片宽高比
-        double picScale = NumberUtil.round(
-                picWidth * 1.0 / picHeight, 2
-        ).doubleValue();
-
-        // 三、设置图片基本信息
-        uploadPictureResult.setPicName(FileUtil.mainName(originFilename));
-        uploadPictureResult.setPicWidth(picWidth);
-        uploadPictureResult.setPicHeight(picHeight);
-        uploadPictureResult.setPicScale(picScale);
-        uploadPictureResult.setPicFormat(imageInfo.getFormat());
-        uploadPictureResult.setPicSize(FileUtil.size(file));
-
-        // 四、设置原图 URL
-        uploadPictureResult.setUrl(
-                cosClientConfig.getHost() + "/" + uploadPath
-        );
-
-        // 五、原图回退时暂时使用原图地址作为缩略图地址
-        uploadPictureResult.setThumbnailUrl(
-                cosClientConfig.getHost() + "/" + uploadPath
-        );
-
-        return uploadPictureResult;
-    }
-
-    /**
-     * 删除临时文件
+     * 删除本地临时文件
      */
     public void deleteTempFile(File file) {
 
@@ -232,10 +346,11 @@ public abstract class PictureUploadTemplate {
             return;
         }
 
-        boolean deleteResult = file.delete();
-
-        if (!deleteResult) {
-            log.error("file delete error, filepath = {}", file.getAbsolutePath());
+        if (file.exists() && !file.delete()) {
+            log.warn(
+                    "临时文件删除失败，filepath={}",
+                    file.getAbsolutePath()
+            );
         }
     }
 }
