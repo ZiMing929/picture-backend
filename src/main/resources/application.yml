@@ -1,0 +1,65 @@
+server:
+  port: 8124
+  servlet:
+    context-path: /api
+
+    # Session Cookie 有效期：30 天
+    session:
+      cookie:
+        max-age: 2592000
+
+spring:
+  application:
+    name: picture-backend
+
+  # 激活本地环境
+  profiles:
+    active: local
+
+  # 图片上传大小限制
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 20MB
+
+  # MySQL 数据库配置
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/yu_picture
+    username: root
+    password: ${DB_PASSWORD}
+
+  # Redis 配置（本地 Redis 没有密码）
+  redis:
+    database: 0
+    host: 127.0.0.1
+    port: 6379
+    timeout: 5000ms
+
+  # Session 存储到 Redis
+  session:
+    store-type: redis
+    timeout: 2592000s
+
+# MyBatis Plus 配置
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: false
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      logic-delete-field: isDelete
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# Knife4j 接口文档配置
+knife4j:
+  enable: true
+  openapi:
+    title: "图片管理系统接口文档"
+    version: "1.0"
+    group:
+      default:
+        api-rule: package
+        api-rule-resources:
+          - com.yupi.yupicturebackend.controller
